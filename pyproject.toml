@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -42,7 +42,8 @@ dev = [
     "fakeredis>=2.0.0",
     "ruff>=0.4.0",
     "build>=1.2.0",
-    "twine>=5.0.0",
+    "twine>=6.1.0",
+    "packaging>=24.2",
 ]
 
 [project.scripts]
