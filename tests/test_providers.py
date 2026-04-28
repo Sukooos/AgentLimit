@@ -1,0 +1,48 @@
+"""Tests for agentlimit.providers pricing and cost calculation."""
+
+import pytest
+
+from agentlimit import UnknownModelError
+from agentlimit.providers import PRICING, calculate_cost, get_supported_models
+
+
+class TestProviders:
+    def test_pricing_table_has_openai(self):
+        assert "openai" in PRICING
+
+    def test_pricing_table_has_anthropic(self):
+        assert "anthropic" in PRICING
+
+    def test_calculate_cost_uses_input_and_output_prices(self):
+        cost = calculate_cost(
+            provider="openai",
+            model="gpt-4o-mini",
+            input_tokens=1000,
+            output_tokens=500,
+        )
+        assert cost == pytest.approx(0.00045)
+
+    def test_calculate_cost_with_custom_pricing_override(self):
+        custom_pricing = {"openai": {"gpt-4o-mini": {"input": 1.0, "output": 2.0}}}
+        cost = calculate_cost(
+            provider="openai",
+            model="gpt-4o-mini",
+            input_tokens=2,
+            output_tokens=3,
+            custom_pricing=custom_pricing,
+        )
+        assert cost == pytest.approx(8.0)
+
+    def test_calculate_cost_raises_for_unknown_model(self):
+        with pytest.raises(UnknownModelError):
+            calculate_cost(
+                provider="openai",
+                model="does-not-exist",
+                input_tokens=10,
+                output_tokens=10,
+            )
+
+    def test_get_supported_models_returns_copy(self):
+        models = get_supported_models()
+        models["openai"]["gpt-4o"]["input"] = 999.0
+        assert PRICING["openai"]["gpt-4o"]["input"] != 999.0
