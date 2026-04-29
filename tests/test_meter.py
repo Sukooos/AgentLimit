@@ -79,6 +79,40 @@ class TestUsageMeterInit:
         with pytest.raises(RedisDataError, match="monthly_budget_usd"):
             UsageMeter(redis_url=redis_url, agent_id="agent-b")
 
+    @pytest.mark.parametrize("stored_budget", ["nan", "inf"])
+    def test_non_finite_stored_usd_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+        stored_budget,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_usd", stored_budget)
+
+        with pytest.raises(RedisDataError, match="monthly_budget_usd"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
+    @pytest.mark.parametrize("stored_budget", ["999.9", "nan", "inf"])
+    def test_invalid_stored_token_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+        stored_budget,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_tokens", stored_budget)
+
+        with pytest.raises(RedisDataError, match="monthly_budget_tokens"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
 
 class TestUsageMeterCore:
     def test_can_spend_rejects_negative_estimate(self, meter_factory):
@@ -112,6 +146,17 @@ class TestUsageMeterCore:
         redis_client.set("agentlimit:agent-a:usd_spent", "not-a-number")
 
         with pytest.raises(RedisDataError, match="usd_spent"):
+            meter.get_usage()
+
+    def test_fractional_token_usage_value_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:tokens_spent", "999.9")
+
+        with pytest.raises(RedisDataError, match="tokens_spent"):
             meter.get_usage()
 
     def test_malformed_last_reset_raises_data_error(

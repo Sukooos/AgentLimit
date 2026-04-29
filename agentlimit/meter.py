@@ -5,7 +5,9 @@ from __future__ import annotations
 import inspect
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from functools import wraps
+from math import isfinite
 from typing import Any, Callable
 
 from redis import Redis
@@ -408,17 +410,23 @@ class UsageMeter:
     @staticmethod
     def _parse_float_value(raw_value: object, field_name: str) -> float:
         try:
-            return float(raw_value)
-        except (TypeError, ValueError) as exc:
+            value = float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
             raise RedisDataError(
                 f"Invalid numeric value for {field_name}: {raw_value}"
             ) from exc
+        if not isfinite(value):
+            raise RedisDataError(f"Invalid numeric value for {field_name}: {raw_value}")
+        return value
 
     @staticmethod
     def _parse_int_value(raw_value: object, field_name: str) -> int:
         try:
-            return int(float(raw_value))
-        except (TypeError, ValueError) as exc:
+            value = Decimal(str(raw_value))
+            if not value.is_finite() or value != value.to_integral_value():
+                raise ValueError
+            return int(value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
             raise RedisDataError(
                 f"Invalid integer value for {field_name}: {raw_value}"
             ) from exc
