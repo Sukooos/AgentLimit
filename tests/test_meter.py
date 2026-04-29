@@ -55,6 +55,16 @@ class TestUsageMeterInit:
         with pytest.raises(InvalidBudgetError):
             meter_factory(monthly_budget_tokens=-1)
 
+    @pytest.mark.parametrize("budget", [float("nan"), float("inf"), float("-inf")])
+    def test_rejects_non_finite_usd_budget(self, meter_factory, budget):
+        with pytest.raises(InvalidBudgetError, match="monthly_budget_usd"):
+            meter_factory(monthly_budget_usd=budget)
+
+    @pytest.mark.parametrize("budget", [1.5, float("nan"), float("inf")])
+    def test_rejects_invalid_token_budget(self, meter_factory, budget):
+        with pytest.raises(InvalidBudgetError, match="monthly_budget_tokens"):
+            meter_factory(monthly_budget_tokens=budget)
+
     def test_rejects_empty_agent_id(self, monkeypatch, redis_client, redis_url):
         monkeypatch.setattr(
             "agentlimit.meter.Redis.from_url",
@@ -121,11 +131,39 @@ class TestUsageMeterCore:
         with pytest.raises(ValueError, match="estimated_cost_usd cannot be negative"):
             meter.can_spend(-0.01)
 
+    @pytest.mark.parametrize(
+        "estimated_cost_usd",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_can_spend_rejects_non_finite_estimate(
+        self,
+        meter_factory,
+        estimated_cost_usd,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost_usd"):
+            meter.can_spend(estimated_cost_usd)
+
     def test_track_rejects_negative_estimated_cost(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)
 
         with pytest.raises(ValueError, match="estimated_cost cannot be negative"):
             meter.track(estimated_cost=-0.01)
+
+    @pytest.mark.parametrize(
+        "estimated_cost",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_track_rejects_non_finite_estimated_cost(
+        self,
+        meter_factory,
+        estimated_cost,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost"):
+            meter.track(estimated_cost=estimated_cost)
 
     def test_record_rejects_negative_tokens(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)
@@ -135,6 +173,32 @@ class TestUsageMeterCore:
                 provider="openai",
                 model="gpt-4o-mini",
                 input_tokens=-1,
+            )
+
+    @pytest.mark.parametrize(
+        ("token_field", "token_value"),
+        [
+            ("input_tokens", float("nan")),
+            ("input_tokens", 1.5),
+            ("output_tokens", float("nan")),
+            ("output_tokens", 1.5),
+            ("tokens_used", float("nan")),
+            ("tokens_used", 1.5),
+        ],
+    )
+    def test_record_rejects_invalid_token_counts(
+        self,
+        meter_factory,
+        token_field,
+        token_value,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Token counts"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                **{token_field: token_value},
             )
 
     def test_malformed_usage_value_raises_data_error(

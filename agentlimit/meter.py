@@ -53,10 +53,10 @@ class UsageMeter:
         if not agent_id.strip():
             raise ValueError("agent_id cannot be empty.")
 
-        if monthly_budget_usd is not None and monthly_budget_usd <= 0:
-            raise InvalidBudgetError("monthly_budget_usd must be greater than zero.")
-        if monthly_budget_tokens is not None and monthly_budget_tokens <= 0:
-            raise InvalidBudgetError("monthly_budget_tokens must be greater than zero.")
+        monthly_budget_usd = self._validate_monthly_budget_usd(monthly_budget_usd)
+        monthly_budget_tokens = self._validate_monthly_budget_tokens(
+            monthly_budget_tokens
+        )
 
         self.agent_id = agent_id
         self.custom_pricing = custom_pricing
@@ -115,8 +115,10 @@ class UsageMeter:
 
     def track(self, estimated_cost: float) -> Callable:
         """Decorator that checks budget before calling the wrapped function."""
-        if estimated_cost < 0:
-            raise ValueError("estimated_cost cannot be negative.")
+        estimated_cost = self._validate_estimated_cost(
+            estimated_cost,
+            "estimated_cost",
+        )
 
         def decorator(func: Callable) -> Callable:
             @wraps(func)
@@ -161,8 +163,10 @@ class UsageMeter:
 
     def can_spend(self, estimated_cost_usd: float) -> bool:
         """Check if the agent can afford the estimated cost without exceeding budget."""
-        if estimated_cost_usd < 0:
-            raise ValueError("estimated_cost_usd cannot be negative.")
+        estimated_cost_usd = self._validate_estimated_cost(
+            estimated_cost_usd,
+            "estimated_cost_usd",
+        )
 
         self._maybe_auto_reset()
         usage = self.get_usage()
@@ -188,8 +192,9 @@ class UsageMeter:
         tokens_used: int = 0,
     ) -> None:
         """Record actual usage after an LLM call."""
-        if input_tokens < 0 or output_tokens < 0 or tokens_used < 0:
-            raise ValueError("Token counts cannot be negative.")
+        input_tokens = self._validate_token_count(input_tokens)
+        output_tokens = self._validate_token_count(output_tokens)
+        tokens_used = self._validate_token_count(tokens_used)
 
         if tokens_used > 0 and input_tokens == 0 and output_tokens == 0:
             # Backward-compatible path when caller only has total tokens.
@@ -408,23 +413,81 @@ class UsageMeter:
         return node
 
     @staticmethod
+    def _coerce_finite_float(raw_value: object) -> float:
+        value = float(raw_value)
+        if not isfinite(value):
+            raise ValueError
+        return value
+
+    @staticmethod
+    def _coerce_integral_decimal(raw_value: object) -> Decimal:
+        value = Decimal(str(raw_value))
+        if not value.is_finite() or value != value.to_integral_value():
+            raise ValueError
+        return value
+
+    @staticmethod
+    def _validate_monthly_budget_usd(raw_value: object | None) -> float | None:
+        if raw_value is None:
+            return None
+        try:
+            value = UsageMeter._coerce_finite_float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise InvalidBudgetError(
+                "monthly_budget_usd must be a finite number."
+            ) from exc
+        if value <= 0:
+            raise InvalidBudgetError("monthly_budget_usd must be greater than zero.")
+        return value
+
+    @staticmethod
+    def _validate_monthly_budget_tokens(raw_value: object | None) -> int | None:
+        if raw_value is None:
+            return None
+        try:
+            value = UsageMeter._coerce_integral_decimal(raw_value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+            raise InvalidBudgetError(
+                "monthly_budget_tokens must be a finite integer."
+            ) from exc
+        if value <= 0:
+            raise InvalidBudgetError("monthly_budget_tokens must be greater than zero.")
+        return int(value)
+
+    @staticmethod
+    def _validate_estimated_cost(raw_value: object, field_name: str) -> float:
+        try:
+            value = UsageMeter._coerce_finite_float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError(f"{field_name} must be finite.") from exc
+        if value < 0:
+            raise ValueError(f"{field_name} cannot be negative.")
+        return value
+
+    @staticmethod
+    def _validate_token_count(raw_value: object) -> int:
+        try:
+            value = UsageMeter._coerce_integral_decimal(raw_value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+            raise ValueError("Token counts must be finite integers.") from exc
+        if value < 0:
+            raise ValueError("Token counts cannot be negative.")
+        return int(value)
+
+    @staticmethod
     def _parse_float_value(raw_value: object, field_name: str) -> float:
         try:
-            value = float(raw_value)
+            value = UsageMeter._coerce_finite_float(raw_value)
         except (TypeError, ValueError, ArithmeticError) as exc:
             raise RedisDataError(
                 f"Invalid numeric value for {field_name}: {raw_value}"
             ) from exc
-        if not isfinite(value):
-            raise RedisDataError(f"Invalid numeric value for {field_name}: {raw_value}")
         return value
 
     @staticmethod
     def _parse_int_value(raw_value: object, field_name: str) -> int:
         try:
-            value = Decimal(str(raw_value))
-            if not value.is_finite() or value != value.to_integral_value():
-                raise ValueError
+            value = UsageMeter._coerce_integral_decimal(raw_value)
             return int(value)
         except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
             raise RedisDataError(
