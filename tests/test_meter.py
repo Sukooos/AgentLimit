@@ -4,7 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agentlimit import BudgetExceededError, InvalidBudgetError, UsageMeter
+from agentlimit import (
+    BudgetExceededError,
+    InvalidBudgetError,
+    RedisDataError,
+    UsageMeter,
+)
 
 
 @pytest.fixture()
@@ -50,8 +55,76 @@ class TestUsageMeterInit:
         with pytest.raises(InvalidBudgetError):
             meter_factory(monthly_budget_tokens=-1)
 
+    def test_rejects_empty_agent_id(self, monkeypatch, redis_client, redis_url):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+
+        with pytest.raises(ValueError, match="agent_id cannot be empty"):
+            UsageMeter(redis_url=redis_url, agent_id="   ")
+
+    def test_malformed_stored_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_usd", "not-a-number")
+
+        with pytest.raises(RedisDataError, match="monthly_budget_usd"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
 
 class TestUsageMeterCore:
+    def test_can_spend_rejects_negative_estimate(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost_usd cannot be negative"):
+            meter.can_spend(-0.01)
+
+    def test_track_rejects_negative_estimated_cost(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost cannot be negative"):
+            meter.track(estimated_cost=-0.01)
+
+    def test_record_rejects_negative_tokens(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Token counts cannot be negative"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                input_tokens=-1,
+            )
+
+    def test_malformed_usage_value_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:usd_spent", "not-a-number")
+
+        with pytest.raises(RedisDataError, match="usd_spent"):
+            meter.get_usage()
+
+    def test_malformed_last_reset_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:last_reset", "not-a-timestamp")
+
+        with pytest.raises(RedisDataError, match="last_reset"):
+            meter.get_usage()
+
     def test_can_spend_within_and_over_budget(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)
         assert meter.can_spend(1.0) is True

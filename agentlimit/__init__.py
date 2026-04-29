@@ -5,6 +5,7 @@ from .exceptions import (
     BudgetExceededError,
     InvalidBudgetError,
     RedisConnectionError,
+    RedisDataError,
     UnknownModelError,
 )
 from .meter import UsageMeter, UsageStats
@@ -18,6 +19,7 @@ __all__ = [
     "InvalidBudgetError",
     "PRICING",
     "RedisConnectionError",
+    "RedisDataError",
     "UnknownModelError",
     "UsageMeter",
     "UsageStats",

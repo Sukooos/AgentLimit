@@ -12,7 +12,12 @@ from redis import Redis
 from redis.exceptions import RedisError
 
 from .alerts import AlertEvent, AlertManager
-from .exceptions import BudgetExceededError, InvalidBudgetError, RedisConnectionError
+from .exceptions import (
+    BudgetExceededError,
+    InvalidBudgetError,
+    RedisConnectionError,
+    RedisDataError,
+)
 from .providers import calculate_cost
 from .reset import perform_reset, should_reset
 
@@ -83,12 +88,16 @@ class UsageMeter:
             if monthly_budget_usd is None:
                 stored_usd = self._redis.get(self._monthly_budget_usd_key)
                 monthly_budget_usd = (
-                    float(stored_usd) if stored_usd is not None else None
+                    self._parse_float_value(stored_usd, "monthly_budget_usd")
+                    if stored_usd is not None
+                    else None
                 )
             if monthly_budget_tokens is None:
                 stored_tokens = self._redis.get(self._monthly_budget_tokens_key)
                 monthly_budget_tokens = (
-                    int(float(stored_tokens)) if stored_tokens is not None else None
+                    self._parse_int_value(stored_tokens, "monthly_budget_tokens")
+                    if stored_tokens is not None
+                    else None
                 )
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
@@ -104,6 +113,8 @@ class UsageMeter:
 
     def track(self, estimated_cost: float) -> Callable:
         """Decorator that checks budget before calling the wrapped function."""
+        if estimated_cost < 0:
+            raise ValueError("estimated_cost cannot be negative.")
 
         def decorator(func: Callable) -> Callable:
             @wraps(func)
@@ -270,7 +281,7 @@ class UsageMeter:
                 self._redis.set(self._last_reset_key, time.time())
                 return
 
-            if should_reset(float(raw)):
+            if should_reset(self._parse_float_value(raw, "last_reset")):
                 perform_reset(self.agent_id, self._redis)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
@@ -280,14 +291,20 @@ class UsageMeter:
             raw = self._redis.get(key)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
-        return float(raw) if raw is not None else 0.0
+        if raw is None:
+            return 0.0
+        field_name = key.rsplit(":", maxsplit=1)[-1]
+        return self._parse_float_value(raw, field_name)
 
     def _read_int(self, key: str) -> int:
         try:
             raw = self._redis.get(key)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
-        return int(float(raw)) if raw is not None else 0
+        if raw is None:
+            return 0
+        field_name = key.rsplit(":", maxsplit=1)[-1]
+        return self._parse_int_value(raw, field_name)
 
     def _instrument_create(
         self,
@@ -387,6 +404,24 @@ class UsageMeter:
             if node is None:
                 raise ValueError(missing_message)
         return node
+
+    @staticmethod
+    def _parse_float_value(raw_value: object, field_name: str) -> float:
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise RedisDataError(
+                f"Invalid numeric value for {field_name}: {raw_value}"
+            ) from exc
+
+    @staticmethod
+    def _parse_int_value(raw_value: object, field_name: str) -> int:
+        try:
+            return int(float(raw_value))
+        except (TypeError, ValueError) as exc:
+            raise RedisDataError(
+                f"Invalid integer value for {field_name}: {raw_value}"
+            ) from exc
 
     @staticmethod
     def _read_attr(source: object | None, field: str) -> object | None:
