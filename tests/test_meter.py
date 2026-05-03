@@ -353,6 +353,34 @@ class TestSdkInstrumentation:
         assert usage.tokens_spent == 1500
         assert usage.usd_spent == pytest.approx(0.00045)
 
+    @pytest.mark.parametrize(
+        "usage_overrides",
+        [
+            {"prompt_tokens": 1.9},
+            {"completion_tokens": float("nan")},
+            {"total_tokens": float("inf")},
+            {"prompt_tokens": -1},
+        ],
+    )
+    def test_openai_instrumentation_rejects_invalid_usage_tokens(
+        self,
+        meter_factory,
+        usage_overrides,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        usage_values = {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+        }
+        usage_values.update(usage_overrides)
+        response = _Obj(model="gpt-4o-mini", usage=_Obj(**usage_values))
+        client = _OpenAIClient(response)
+
+        meter.instrument_openai_client(client)
+        with pytest.raises(ValueError, match="[Tt]oken count"):
+            client.chat.completions.create(model="gpt-4o-mini", messages=[])
+
     def test_openai_instrumentation_is_idempotent(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
         response = _Obj(
@@ -383,6 +411,29 @@ class TestSdkInstrumentation:
         usage = meter.get_usage()
         assert usage.tokens_spent == 1500
         assert usage.usd_spent == pytest.approx(0.000875)
+
+    @pytest.mark.parametrize(
+        "usage_overrides",
+        [
+            {"input_tokens": 1.9},
+            {"output_tokens": float("inf")},
+            {"input_tokens": -1},
+        ],
+    )
+    def test_anthropic_instrumentation_rejects_invalid_usage_tokens(
+        self,
+        meter_factory,
+        usage_overrides,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        usage_values = {"input_tokens": 1000, "output_tokens": 500}
+        usage_values.update(usage_overrides)
+        response = _Obj(model="claude-haiku-4", usage=_Obj(**usage_values))
+        client = _AnthropicClient(response)
+
+        meter.instrument_anthropic_client(client)
+        with pytest.raises(ValueError, match="[Tt]oken count"):
+            client.messages.create(model="claude-haiku-4", max_tokens=256, messages=[])
 
     def test_openai_instrumentation_fails_loudly_without_usage(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)

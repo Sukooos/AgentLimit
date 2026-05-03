@@ -507,9 +507,6 @@ class UsageMeter:
         if raw_value is None:
             return 0
         try:
-            value = int(raw_value)
-        except (TypeError, ValueError) as exc:
+            return UsageMeter._validate_token_count(raw_value)
+        except ValueError as exc:
             raise ValueError(f"Invalid token count: {raw_value}") from exc
-        if value < 0:
-            raise ValueError("Token counts cannot be negative.")
-        return value
