@@ -132,7 +132,8 @@ would break budget enforcement. If your SDK response shape differs, use manual
 ## Alert callbacks
 
 ```python
-from agentlimit import AlertEvent, UsageMeter
+from agentlimit import UsageMeter
+from agentlimit.alerts import AlertEvent
 
 def on_alert(event: AlertEvent) -> None:
     print(
