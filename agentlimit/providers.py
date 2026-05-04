@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from math import isfinite
 
 from .exceptions import UnknownModelError
@@ -20,10 +22,36 @@ PRICING: dict[str, dict[str, dict[str, float]]] = {
 }
 
 
+def _coerce_token_count(raw_value: object) -> int:
+    if isinstance(raw_value, bool) or raw_value is None:
+        raise ValueError("Token counts must be finite non-negative integers.")
+
+    try:
+        token_count = Decimal(raw_value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Token counts must be finite non-negative integers."
+        ) from exc
+
+    if (
+        not token_count.is_finite()
+        or token_count < 0
+        or token_count != token_count.to_integral_value()
+    ):
+        raise ValueError("Token counts must be finite non-negative integers.")
+
+    return int(token_count)
+
+
 def _coerce_rate(provider: str, model: str, token_type: str, raw_rate: object) -> float:
+    if isinstance(raw_rate, bool):
+        raise ValueError(
+            f"Invalid pricing rate for {provider}/{model} {token_type}: {raw_rate}"
+        )
+
     try:
         rate = float(raw_rate)
-    except (TypeError, ValueError) as exc:
+    except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError(
             f"Invalid pricing rate for {provider}/{model} {token_type}: {raw_rate}"
         ) from exc
@@ -40,12 +68,24 @@ def _build_pricing(
     custom_pricing: dict | None,
 ) -> dict[str, dict[str, dict[str, float]]]:
     pricing = deepcopy(PRICING)
-    if not custom_pricing:
+    if custom_pricing is None:
         return pricing
+    if not isinstance(custom_pricing, Mapping):
+        raise ValueError("Invalid pricing; custom_pricing must be a mapping.")
 
     for provider, models in custom_pricing.items():
+        if not isinstance(models, Mapping):
+            raise ValueError(
+                f"Invalid pricing for {provider}; expected model mapping."
+            )
+
         provider_models = pricing.setdefault(provider, {})
         for model, rates in models.items():
+            if not isinstance(rates, Mapping):
+                raise ValueError(
+                    "Invalid pricing for "
+                    f"{provider}/{model}; expected input and output."
+                )
             if "input" not in rates or "output" not in rates:
                 raise ValueError(
                     "Invalid pricing for "
@@ -66,8 +106,8 @@ def calculate_cost(
     custom_pricing: dict | None = None,
 ) -> float:
     """Calculate USD cost for a given model and token usage."""
-    if input_tokens < 0 or output_tokens < 0:
-        raise ValueError("Token counts cannot be negative.")
+    input_token_count = _coerce_token_count(input_tokens)
+    output_token_count = _coerce_token_count(output_tokens)
 
     pricing = _build_pricing(custom_pricing)
     if provider not in pricing:
@@ -76,8 +116,8 @@ def calculate_cost(
         raise UnknownModelError(f"Unknown model '{model}' for provider '{provider}'")
 
     model_pricing = pricing[provider][model]
-    return (input_tokens * model_pricing["input"]) + (
-        output_tokens * model_pricing["output"]
+    return (input_token_count * model_pricing["input"]) + (
+        output_token_count * model_pricing["output"]
     )
 
 

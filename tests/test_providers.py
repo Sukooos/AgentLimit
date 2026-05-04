@@ -33,6 +33,39 @@ class TestProviders:
         )
         assert cost == pytest.approx(8.0)
 
+    def test_calculate_cost_accepts_integer_numeric_string_token_counts(self):
+        cost = calculate_cost(
+            provider="openai",
+            model="gpt-4o-mini",
+            input_tokens="1000",
+            output_tokens="500",
+        )
+        assert cost == pytest.approx(0.00045)
+
+    @pytest.mark.parametrize(
+        "bad_tokens",
+        [float("nan"), float("inf"), 1.5, -1, True, None, "ten"],
+    )
+    def test_calculate_cost_rejects_invalid_input_token_counts(self, bad_tokens):
+        with pytest.raises(ValueError, match="Token counts"):
+            calculate_cost(
+                provider="openai",
+                model="gpt-4o-mini",
+                input_tokens=bad_tokens,
+            )
+
+    @pytest.mark.parametrize(
+        "bad_tokens",
+        [float("nan"), float("inf"), 1.5, -1, True, None, "ten"],
+    )
+    def test_calculate_cost_rejects_invalid_output_token_counts(self, bad_tokens):
+        with pytest.raises(ValueError, match="Token counts"):
+            calculate_cost(
+                provider="openai",
+                model="gpt-4o-mini",
+                output_tokens=bad_tokens,
+            )
+
     def test_custom_pricing_requires_input_and_output_rates(self):
         with pytest.raises(ValueError, match="expected input and output"):
             calculate_cost(
@@ -61,6 +94,38 @@ class TestProviders:
                 input_tokens=1,
                 custom_pricing={
                     "test": {"model-a": {"input": "cheap", "output": 0.0}}
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "custom_pricing",
+        [
+            {"test": None},
+            {"test": {"model-a": None}},
+            {"test": {"model-a": []}},
+        ],
+    )
+    def test_custom_pricing_rejects_malformed_shapes(self, custom_pricing):
+        with pytest.raises(ValueError, match="Invalid pricing"):
+            calculate_cost(
+                provider="test",
+                model="model-a",
+                input_tokens=1,
+                custom_pricing=custom_pricing,
+            )
+
+    @pytest.mark.parametrize(
+        "bad_rate",
+        [True, False, float("nan"), float("inf")],
+    )
+    def test_custom_pricing_rejects_invalid_rates_with_context(self, bad_rate):
+        with pytest.raises(ValueError, match="[Pp]ricing rate"):
+            calculate_cost(
+                provider="test",
+                model="model-a",
+                input_tokens=1,
+                custom_pricing={
+                    "test": {"model-a": {"input": bad_rate, "output": 0.0}}
                 },
             )
 
