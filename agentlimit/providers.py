@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from math import isfinite
 
 from .exceptions import UnknownModelError
 
@@ -17,6 +18,22 @@ PRICING: dict[str, dict[str, dict[str, float]]] = {
         "claude-haiku-4": {"input": 0.00000025, "output": 0.00000125},
     },
 }
+
+
+def _coerce_rate(provider: str, model: str, token_type: str, raw_rate: object) -> float:
+    try:
+        rate = float(raw_rate)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid pricing rate for {provider}/{model} {token_type}: {raw_rate}"
+        ) from exc
+
+    if not isfinite(rate) or rate < 0:
+        raise ValueError(
+            f"Pricing rate for {provider}/{model} {token_type} "
+            "must be finite and non-negative."
+        )
+    return rate
 
 
 def _build_pricing(
@@ -35,8 +52,8 @@ def _build_pricing(
                     f"{provider}/{model}; expected input and output."
                 )
             provider_models[model] = {
-                "input": float(rates["input"]),
-                "output": float(rates["output"]),
+                "input": _coerce_rate(provider, model, "input", rates["input"]),
+                "output": _coerce_rate(provider, model, "output", rates["output"]),
             }
     return pricing
 

@@ -25,7 +25,7 @@ def status(
     try:
         meter = UsageMeter(redis_url=redis, agent_id=agent)
         usage = meter.get_usage()
-    except AgentLimitError as exc:
+    except (AgentLimitError, ValueError) as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1) from exc
 
@@ -69,7 +69,7 @@ def reset(
     try:
         meter = UsageMeter(redis_url=redis, agent_id=agent)
         meter.reset()
-    except AgentLimitError as exc:
+    except (AgentLimitError, ValueError) as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1) from exc
 

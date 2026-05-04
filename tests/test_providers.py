@@ -33,6 +33,37 @@ class TestProviders:
         )
         assert cost == pytest.approx(8.0)
 
+    def test_custom_pricing_requires_input_and_output_rates(self):
+        with pytest.raises(ValueError, match="expected input and output"):
+            calculate_cost(
+                provider="test",
+                model="model-a",
+                input_tokens=1,
+                custom_pricing={"test": {"model-a": {"input": 1.0}}},
+            )
+
+    def test_custom_pricing_rejects_negative_rates(self):
+        with pytest.raises(ValueError, match="must be finite and non-negative"):
+            calculate_cost(
+                provider="test",
+                model="model-a",
+                input_tokens=1,
+                custom_pricing={
+                    "test": {"model-a": {"input": -1.0, "output": 0.0}}
+                },
+            )
+
+    def test_custom_pricing_rejects_non_numeric_rates(self):
+        with pytest.raises(ValueError, match="Invalid pricing rate"):
+            calculate_cost(
+                provider="test",
+                model="model-a",
+                input_tokens=1,
+                custom_pricing={
+                    "test": {"model-a": {"input": "cheap", "output": 0.0}}
+                },
+            )
+
     def test_calculate_cost_raises_for_unknown_model(self):
         with pytest.raises(UnknownModelError):
             calculate_cost(

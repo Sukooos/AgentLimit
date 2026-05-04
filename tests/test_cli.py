@@ -50,6 +50,12 @@ class TestCli:
         assert "Tokens Used:" in result.output
         assert "Status:        OK" in result.output
 
+    def test_status_shows_clean_error_for_empty_agent(self):
+        result = runner.invoke(app, ["status", "--agent", ""])
+
+        assert result.exit_code == 1
+        assert "Error: agent_id cannot be empty." in result.output
+
     def test_reset_clears_usage(self, monkeypatch, redis_client, redis_url):
         _patch_redis(monkeypatch, redis_client)
         meter = UsageMeter(
@@ -70,3 +76,9 @@ class TestCli:
         assert "Budget reset for agent 'cli-agent'." in result.output
         assert float(redis_client.get(f"{prefix}usd_spent")) == 0.0
         assert int(redis_client.get(f"{prefix}tokens_spent")) == 0
+
+    def test_reset_shows_clean_error_for_empty_agent(self):
+        result = runner.invoke(app, ["reset", "--agent", ""])
+
+        assert result.exit_code == 1
+        assert "Error: agent_id cannot be empty." in result.output
