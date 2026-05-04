@@ -78,6 +78,18 @@ response = client.messages.create(
 # usage is recorded automatically
 ```
 
+## SDK instrumentation limitations
+
+Auto-instrumentation currently wraps:
+
+- OpenAI: `client.chat.completions.create(...)`
+- Anthropic: `client.messages.create(...)`
+
+The wrapped SDK call must return usage metadata. AgentLimit raises a `ValueError`
+if usage or model information is missing, because silently skipping metering
+would break budget enforcement. If your SDK response shape differs, use manual
+`meter.record(...)` with explicit token counts.
+
 ## CLI
 
 ```bash

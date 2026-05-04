@@ -1,5 +1,6 @@
 """Tests for agentlimit.meter UsageMeter behavior."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -36,6 +37,15 @@ class _OpenAIClient:
         self.chat = _Obj(completions=_Obj(create=self._create))
 
     def _create(self, *args, **kwargs):
+        return self._response
+
+
+class _AsyncOpenAIClient:
+    def __init__(self, response):
+        self._response = response
+        self.chat = _Obj(completions=_Obj(create=self._create))
+
+    async def _create(self, *args, **kwargs):
         return self._response
 
 
@@ -353,6 +363,21 @@ class TestSdkInstrumentation:
         assert usage.tokens_spent == 1500
         assert usage.usd_spent == pytest.approx(0.00045)
 
+    def test_async_openai_instrumentation_records_usage(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        response = _Obj(
+            model="gpt-4o-mini",
+            usage=_Obj(prompt_tokens=1000, completion_tokens=500, total_tokens=1500),
+        )
+        client = _AsyncOpenAIClient(response)
+
+        meter.instrument_openai_client(client)
+        asyncio.run(client.chat.completions.create(model="gpt-4o-mini", messages=[]))
+
+        usage = meter.get_usage()
+        assert usage.tokens_spent == 1500
+        assert usage.usd_spent == pytest.approx(0.00045)
+
     @pytest.mark.parametrize(
         "usage_overrides",
         [
@@ -443,3 +468,15 @@ class TestSdkInstrumentation:
         meter.instrument_openai_client(client)
         with pytest.raises(ValueError):
             client.chat.completions.create(model="gpt-4o-mini", messages=[])
+
+    def test_openai_instrumentation_rejects_missing_path(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="OpenAI client missing chat.completions"):
+            meter.instrument_openai_client(_Obj())
+
+    def test_anthropic_instrumentation_rejects_missing_path(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Anthropic client missing messages"):
+            meter.instrument_anthropic_client(_Obj())
