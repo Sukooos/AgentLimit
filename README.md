@@ -110,7 +110,7 @@ meter = UsageMeter(
 meter.instrument_anthropic_client(client)
 
 response = client.messages.create(
-    model="claude-haiku-4",
+    model="claude-haiku-4-5-20251001",
     max_tokens=256,
     messages=[{"role": "user", "content": "hello"}],
 )
@@ -164,8 +164,14 @@ Built-in pricing is a convenience table for common OpenAI and Anthropic models.
 Provider pricing changes over time, so production users should verify rates and
 use `custom_pricing` when exact billing accuracy matters.
 
-Redis counter updates are atomic. The pre-call `can_spend(...)` check and the
-post-call `record(...)` update are not a reservation system, so highly concurrent
-agents can still race between checking and recording. AgentLimit fails loudly
-when Redis is unavailable or usage data is malformed instead of silently skipping
+For exact split-priced USD accounting, pass `input_tokens` and `output_tokens`
+to `meter.record(...)`. If only `tokens_used` is supplied, AgentLimit preserves
+token-budget accounting and conservatively prices those tokens at the model's
+output-token rate.
+
+The USD and token counters inside a single `record(...)` call are updated in one
+Redis transaction. The pre-call `can_spend(...)` check and the post-call
+`record(...)` update are not a reservation system, so highly concurrent agents
+can still race between checking and recording. AgentLimit fails loudly when
+Redis is unavailable or usage data is malformed instead of silently skipping
 metering.

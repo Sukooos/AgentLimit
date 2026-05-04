@@ -100,11 +100,18 @@ if meter.can_spend(estimated_cost_usd=0.05):
     meter.record(
         provider='openai',
         model='gpt-4o',
+        input_tokens=response.usage.prompt_tokens,
+        output_tokens=response.usage.completion_tokens,
         tokens_used=response.usage.total_tokens
     )
 else:
     raise BudgetExceededError("Monthly budget reached")
 ```
+
+For exact split-priced USD accounting, callers should provide `input_tokens`
+and `output_tokens`. `tokens_used` is still accepted for token-budget accounting;
+when it is provided without split counts, AgentLimit conservatively prices the
+total as output tokens.
 
 ### 5.3 Alert System
 
@@ -157,8 +164,9 @@ PRICING = {
         "gpt-3.5-turbo": {"input": 0.0000005,  "output": 0.0000015},
     },
     "anthropic": {
-        "claude-sonnet-4": {"input": 0.000003,   "output": 0.000015},
-        "claude-haiku-4":  {"input": 0.00000025, "output": 0.00000125},
+        "claude-sonnet-4-6":          {"input": 0.000003, "output": 0.000015},
+        "claude-haiku-4-5-20251001":  {"input": 0.000001, "output": 0.000005},
+        "claude-haiku-4-5":           {"input": 0.000001, "output": 0.000005},
     }
 }
 ```

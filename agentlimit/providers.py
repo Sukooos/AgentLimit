@@ -16,8 +16,9 @@ PRICING: dict[str, dict[str, dict[str, float]]] = {
         "gpt-3.5-turbo": {"input": 0.0000005, "output": 0.0000015},
     },
     "anthropic": {
-        "claude-sonnet-4": {"input": 0.000003, "output": 0.000015},
-        "claude-haiku-4": {"input": 0.00000025, "output": 0.00000125},
+        "claude-sonnet-4-6": {"input": 0.000003, "output": 0.000015},
+        "claude-haiku-4-5-20251001": {"input": 0.000001, "output": 0.000005},
+        "claude-haiku-4-5": {"input": 0.000001, "output": 0.000005},
     },
 }
 

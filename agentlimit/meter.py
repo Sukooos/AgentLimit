@@ -197,8 +197,9 @@ class UsageMeter:
         tokens_used = self._validate_token_count(tokens_used)
 
         if tokens_used > 0 and input_tokens == 0 and output_tokens == 0:
-            # Backward-compatible path when caller only has total tokens.
-            input_tokens = tokens_used
+            # Total-only usage cannot be split accurately; use output pricing
+            # as the conservative default for split-priced models.
+            output_tokens = tokens_used
 
         total_tokens = tokens_used or (input_tokens + output_tokens)
         call_cost = calculate_cost(
@@ -232,8 +233,10 @@ class UsageMeter:
             )
 
         try:
-            self._redis.incrbyfloat(self._usd_spent_key, call_cost)
-            self._redis.incrby(self._tokens_spent_key, total_tokens)
+            pipe = self._redis.pipeline(transaction=True)
+            pipe.incrbyfloat(self._usd_spent_key, call_cost)
+            pipe.incrby(self._tokens_spent_key, total_tokens)
+            pipe.execute()
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
 

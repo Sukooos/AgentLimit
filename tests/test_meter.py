@@ -4,10 +4,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from redis.exceptions import RedisError
 
 from agentlimit import (
     BudgetExceededError,
     InvalidBudgetError,
+    RedisConnectionError,
     RedisDataError,
     UsageMeter,
 )
@@ -56,6 +58,17 @@ class _AnthropicClient:
 
     def _create(self, *args, **kwargs):
         return self._response
+
+
+class _FailingPipeline:
+    def incrbyfloat(self, *_args, **_kwargs):
+        return self
+
+    def incrby(self, *_args, **_kwargs):
+        return self
+
+    def execute(self):
+        raise RedisError("pipeline failed")
 
 
 class TestUsageMeterInit:
@@ -270,6 +283,45 @@ class TestUsageMeterCore:
         assert usage.percent_usd == pytest.approx(0.0045)
         assert usage.percent_tokens == pytest.approx(75.0)
 
+    def test_record_charges_total_only_tokens_at_output_rate(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=2000)
+
+        meter.record(
+            provider="openai",
+            model="gpt-4o-mini",
+            tokens_used=1000,
+        )
+
+        usage = meter.get_usage()
+        assert usage.tokens_spent == 1000
+        assert usage.usd_spent == pytest.approx(0.0006)
+
+    def test_record_pipeline_failure_leaves_counters_unchanged(
+        self,
+        meter_factory,
+        monkeypatch,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=2000)
+        redis_client.set("agentlimit:agent-a:usd_spent", 1.25)
+        redis_client.set("agentlimit:agent-a:tokens_spent", 7)
+        monkeypatch.setattr(
+            redis_client,
+            "pipeline",
+            lambda *args, **kwargs: _FailingPipeline(),
+        )
+
+        with pytest.raises(RedisConnectionError, match="pipeline failed"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                input_tokens=1000,
+                output_tokens=500,
+            )
+
+        assert float(redis_client.get("agentlimit:agent-a:usd_spent")) == 1.25
+        assert int(redis_client.get("agentlimit:agent-a:tokens_spent")) == 7
+
     def test_record_raises_when_budget_exceeded(self, meter_factory):
         meter = meter_factory(
             monthly_budget_usd=1.0,
@@ -425,17 +477,21 @@ class TestSdkInstrumentation:
     def test_anthropic_instrumentation_records_usage(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
         response = _Obj(
-            model="claude-haiku-4",
+            model="claude-haiku-4-5-20251001",
             usage=_Obj(input_tokens=1000, output_tokens=500),
         )
         client = _AnthropicClient(response)
 
         meter.instrument_anthropic_client(client)
-        client.messages.create(model="claude-haiku-4", max_tokens=256, messages=[])
+        client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[],
+        )
 
         usage = meter.get_usage()
         assert usage.tokens_spent == 1500
-        assert usage.usd_spent == pytest.approx(0.000875)
+        assert usage.usd_spent == pytest.approx(0.0035)
 
     @pytest.mark.parametrize(
         "usage_overrides",
@@ -453,12 +509,19 @@ class TestSdkInstrumentation:
         meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
         usage_values = {"input_tokens": 1000, "output_tokens": 500}
         usage_values.update(usage_overrides)
-        response = _Obj(model="claude-haiku-4", usage=_Obj(**usage_values))
+        response = _Obj(
+            model="claude-haiku-4-5-20251001",
+            usage=_Obj(**usage_values),
+        )
         client = _AnthropicClient(response)
 
         meter.instrument_anthropic_client(client)
         with pytest.raises(ValueError, match="[Tt]oken count"):
-            client.messages.create(model="claude-haiku-4", max_tokens=256, messages=[])
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                messages=[],
+            )
 
     def test_openai_instrumentation_fails_loudly_without_usage(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)

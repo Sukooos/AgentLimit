@@ -13,6 +13,25 @@ class TestProviders:
     def test_pricing_table_has_anthropic(self):
         assert "anthropic" in PRICING
 
+    @pytest.mark.parametrize(
+        ("model", "input_rate", "output_rate"),
+        [
+            ("claude-sonnet-4-6", 0.000003, 0.000015),
+            ("claude-haiku-4-5-20251001", 0.000001, 0.000005),
+            ("claude-haiku-4-5", 0.000001, 0.000005),
+        ],
+    )
+    def test_anthropic_pricing_uses_current_model_ids(
+        self,
+        model,
+        input_rate,
+        output_rate,
+    ):
+        assert PRICING["anthropic"][model] == {
+            "input": input_rate,
+            "output": output_rate,
+        }
+
     def test_calculate_cost_uses_input_and_output_prices(self):
         cost = calculate_cost(
             provider="openai",
