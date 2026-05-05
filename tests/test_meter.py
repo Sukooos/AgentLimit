@@ -1,10 +1,18 @@
 """Tests for agentlimit.meter UsageMeter behavior."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from redis.exceptions import RedisError
 
-from agentlimit import BudgetExceededError, InvalidBudgetError, UsageMeter
+from agentlimit import (
+    BudgetExceededError,
+    InvalidBudgetError,
+    RedisConnectionError,
+    RedisDataError,
+    UsageMeter,
+)
 
 
 @pytest.fixture()
@@ -34,6 +42,15 @@ class _OpenAIClient:
         return self._response
 
 
+class _AsyncOpenAIClient:
+    def __init__(self, response):
+        self._response = response
+        self.chat = _Obj(completions=_Obj(create=self._create))
+
+    async def _create(self, *args, **kwargs):
+        return self._response
+
+
 class _AnthropicClient:
     def __init__(self, response):
         self._response = response
@@ -43,6 +60,17 @@ class _AnthropicClient:
         return self._response
 
 
+class _FailingPipeline:
+    def incrbyfloat(self, *_args, **_kwargs):
+        return self
+
+    def incrby(self, *_args, **_kwargs):
+        return self
+
+    def execute(self):
+        raise RedisError("pipeline failed")
+
+
 class TestUsageMeterInit:
     def test_rejects_invalid_budgets(self, meter_factory):
         with pytest.raises(InvalidBudgetError):
@@ -50,8 +78,185 @@ class TestUsageMeterInit:
         with pytest.raises(InvalidBudgetError):
             meter_factory(monthly_budget_tokens=-1)
 
+    @pytest.mark.parametrize("budget", [float("nan"), float("inf"), float("-inf")])
+    def test_rejects_non_finite_usd_budget(self, meter_factory, budget):
+        with pytest.raises(InvalidBudgetError, match="monthly_budget_usd"):
+            meter_factory(monthly_budget_usd=budget)
+
+    @pytest.mark.parametrize("budget", [1.5, float("nan"), float("inf")])
+    def test_rejects_invalid_token_budget(self, meter_factory, budget):
+        with pytest.raises(InvalidBudgetError, match="monthly_budget_tokens"):
+            meter_factory(monthly_budget_tokens=budget)
+
+    def test_rejects_empty_agent_id(self, monkeypatch, redis_client, redis_url):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+
+        with pytest.raises(ValueError, match="agent_id cannot be empty"):
+            UsageMeter(redis_url=redis_url, agent_id="   ")
+
+    def test_malformed_stored_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_usd", "not-a-number")
+
+        with pytest.raises(RedisDataError, match="monthly_budget_usd"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
+    @pytest.mark.parametrize("stored_budget", ["nan", "inf"])
+    def test_non_finite_stored_usd_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+        stored_budget,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_usd", stored_budget)
+
+        with pytest.raises(RedisDataError, match="monthly_budget_usd"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
+    @pytest.mark.parametrize("stored_budget", ["999.9", "nan", "inf"])
+    def test_invalid_stored_token_budget_raises_data_error(
+        self,
+        monkeypatch,
+        redis_client,
+        redis_url,
+        stored_budget,
+    ):
+        monkeypatch.setattr(
+            "agentlimit.meter.Redis.from_url",
+            lambda *args, **kwargs: redis_client,
+        )
+        redis_client.set("agentlimit:agent-b:monthly_budget_tokens", stored_budget)
+
+        with pytest.raises(RedisDataError, match="monthly_budget_tokens"):
+            UsageMeter(redis_url=redis_url, agent_id="agent-b")
+
 
 class TestUsageMeterCore:
+    def test_can_spend_rejects_negative_estimate(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost_usd cannot be negative"):
+            meter.can_spend(-0.01)
+
+    @pytest.mark.parametrize(
+        "estimated_cost_usd",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_can_spend_rejects_non_finite_estimate(
+        self,
+        meter_factory,
+        estimated_cost_usd,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost_usd"):
+            meter.can_spend(estimated_cost_usd)
+
+    def test_track_rejects_negative_estimated_cost(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost cannot be negative"):
+            meter.track(estimated_cost=-0.01)
+
+    @pytest.mark.parametrize(
+        "estimated_cost",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_track_rejects_non_finite_estimated_cost(
+        self,
+        meter_factory,
+        estimated_cost,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="estimated_cost"):
+            meter.track(estimated_cost=estimated_cost)
+
+    def test_record_rejects_negative_tokens(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Token counts cannot be negative"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                input_tokens=-1,
+            )
+
+    @pytest.mark.parametrize(
+        ("token_field", "token_value"),
+        [
+            ("input_tokens", float("nan")),
+            ("input_tokens", 1.5),
+            ("output_tokens", float("nan")),
+            ("output_tokens", 1.5),
+            ("tokens_used", float("nan")),
+            ("tokens_used", 1.5),
+        ],
+    )
+    def test_record_rejects_invalid_token_counts(
+        self,
+        meter_factory,
+        token_field,
+        token_value,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Token counts"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                **{token_field: token_value},
+            )
+
+    def test_malformed_usage_value_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:usd_spent", "not-a-number")
+
+        with pytest.raises(RedisDataError, match="usd_spent"):
+            meter.get_usage()
+
+    def test_fractional_token_usage_value_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:tokens_spent", "999.9")
+
+        with pytest.raises(RedisDataError, match="tokens_spent"):
+            meter.get_usage()
+
+    def test_malformed_last_reset_raises_data_error(
+        self,
+        meter_factory,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0)
+        redis_client.set("agentlimit:agent-a:last_reset", "not-a-timestamp")
+
+        with pytest.raises(RedisDataError, match="last_reset"):
+            meter.get_usage()
+
     def test_can_spend_within_and_over_budget(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)
         assert meter.can_spend(1.0) is True
@@ -77,6 +282,45 @@ class TestUsageMeterCore:
         assert usage.usd_spent == pytest.approx(0.00045)
         assert usage.percent_usd == pytest.approx(0.0045)
         assert usage.percent_tokens == pytest.approx(75.0)
+
+    def test_record_charges_total_only_tokens_at_output_rate(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=2000)
+
+        meter.record(
+            provider="openai",
+            model="gpt-4o-mini",
+            tokens_used=1000,
+        )
+
+        usage = meter.get_usage()
+        assert usage.tokens_spent == 1000
+        assert usage.usd_spent == pytest.approx(0.0006)
+
+    def test_record_pipeline_failure_leaves_counters_unchanged(
+        self,
+        meter_factory,
+        monkeypatch,
+        redis_client,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=2000)
+        redis_client.set("agentlimit:agent-a:usd_spent", 1.25)
+        redis_client.set("agentlimit:agent-a:tokens_spent", 7)
+        monkeypatch.setattr(
+            redis_client,
+            "pipeline",
+            lambda *args, **kwargs: _FailingPipeline(),
+        )
+
+        with pytest.raises(RedisConnectionError, match="pipeline failed"):
+            meter.record(
+                provider="openai",
+                model="gpt-4o-mini",
+                input_tokens=1000,
+                output_tokens=500,
+            )
+
+        assert float(redis_client.get("agentlimit:agent-a:usd_spent")) == 1.25
+        assert int(redis_client.get("agentlimit:agent-a:tokens_spent")) == 7
 
     def test_record_raises_when_budget_exceeded(self, meter_factory):
         meter = meter_factory(
@@ -171,6 +415,49 @@ class TestSdkInstrumentation:
         assert usage.tokens_spent == 1500
         assert usage.usd_spent == pytest.approx(0.00045)
 
+    def test_async_openai_instrumentation_records_usage(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        response = _Obj(
+            model="gpt-4o-mini",
+            usage=_Obj(prompt_tokens=1000, completion_tokens=500, total_tokens=1500),
+        )
+        client = _AsyncOpenAIClient(response)
+
+        meter.instrument_openai_client(client)
+        asyncio.run(client.chat.completions.create(model="gpt-4o-mini", messages=[]))
+
+        usage = meter.get_usage()
+        assert usage.tokens_spent == 1500
+        assert usage.usd_spent == pytest.approx(0.00045)
+
+    @pytest.mark.parametrize(
+        "usage_overrides",
+        [
+            {"prompt_tokens": 1.9},
+            {"completion_tokens": float("nan")},
+            {"total_tokens": float("inf")},
+            {"prompt_tokens": -1},
+        ],
+    )
+    def test_openai_instrumentation_rejects_invalid_usage_tokens(
+        self,
+        meter_factory,
+        usage_overrides,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        usage_values = {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+        }
+        usage_values.update(usage_overrides)
+        response = _Obj(model="gpt-4o-mini", usage=_Obj(**usage_values))
+        client = _OpenAIClient(response)
+
+        meter.instrument_openai_client(client)
+        with pytest.raises(ValueError, match="[Tt]oken count"):
+            client.chat.completions.create(model="gpt-4o-mini", messages=[])
+
     def test_openai_instrumentation_is_idempotent(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
         response = _Obj(
@@ -190,17 +477,51 @@ class TestSdkInstrumentation:
     def test_anthropic_instrumentation_records_usage(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
         response = _Obj(
-            model="claude-haiku-4",
+            model="claude-haiku-4-5-20251001",
             usage=_Obj(input_tokens=1000, output_tokens=500),
         )
         client = _AnthropicClient(response)
 
         meter.instrument_anthropic_client(client)
-        client.messages.create(model="claude-haiku-4", max_tokens=256, messages=[])
+        client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[],
+        )
 
         usage = meter.get_usage()
         assert usage.tokens_spent == 1500
-        assert usage.usd_spent == pytest.approx(0.000875)
+        assert usage.usd_spent == pytest.approx(0.0035)
+
+    @pytest.mark.parametrize(
+        "usage_overrides",
+        [
+            {"input_tokens": 1.9},
+            {"output_tokens": float("inf")},
+            {"input_tokens": -1},
+        ],
+    )
+    def test_anthropic_instrumentation_rejects_invalid_usage_tokens(
+        self,
+        meter_factory,
+        usage_overrides,
+    ):
+        meter = meter_factory(monthly_budget_usd=10.0, monthly_budget_tokens=5000)
+        usage_values = {"input_tokens": 1000, "output_tokens": 500}
+        usage_values.update(usage_overrides)
+        response = _Obj(
+            model="claude-haiku-4-5-20251001",
+            usage=_Obj(**usage_values),
+        )
+        client = _AnthropicClient(response)
+
+        meter.instrument_anthropic_client(client)
+        with pytest.raises(ValueError, match="[Tt]oken count"):
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                messages=[],
+            )
 
     def test_openai_instrumentation_fails_loudly_without_usage(self, meter_factory):
         meter = meter_factory(monthly_budget_usd=10.0)
@@ -210,3 +531,15 @@ class TestSdkInstrumentation:
         meter.instrument_openai_client(client)
         with pytest.raises(ValueError):
             client.chat.completions.create(model="gpt-4o-mini", messages=[])
+
+    def test_openai_instrumentation_rejects_missing_path(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="OpenAI client missing chat.completions"):
+            meter.instrument_openai_client(_Obj())
+
+    def test_anthropic_instrumentation_rejects_missing_path(self, meter_factory):
+        meter = meter_factory(monthly_budget_usd=10.0)
+
+        with pytest.raises(ValueError, match="Anthropic client missing messages"):
+            meter.instrument_anthropic_client(_Obj())

@@ -5,14 +5,21 @@ from __future__ import annotations
 import inspect
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from functools import wraps
+from math import isfinite
 from typing import Any, Callable
 
 from redis import Redis
 from redis.exceptions import RedisError
 
 from .alerts import AlertEvent, AlertManager
-from .exceptions import BudgetExceededError, InvalidBudgetError, RedisConnectionError
+from .exceptions import (
+    BudgetExceededError,
+    InvalidBudgetError,
+    RedisConnectionError,
+    RedisDataError,
+)
 from .providers import calculate_cost
 from .reset import perform_reset, should_reset
 
@@ -46,10 +53,10 @@ class UsageMeter:
         if not agent_id.strip():
             raise ValueError("agent_id cannot be empty.")
 
-        if monthly_budget_usd is not None and monthly_budget_usd <= 0:
-            raise InvalidBudgetError("monthly_budget_usd must be greater than zero.")
-        if monthly_budget_tokens is not None and monthly_budget_tokens <= 0:
-            raise InvalidBudgetError("monthly_budget_tokens must be greater than zero.")
+        monthly_budget_usd = self._validate_monthly_budget_usd(monthly_budget_usd)
+        monthly_budget_tokens = self._validate_monthly_budget_tokens(
+            monthly_budget_tokens
+        )
 
         self.agent_id = agent_id
         self.custom_pricing = custom_pricing
@@ -83,12 +90,16 @@ class UsageMeter:
             if monthly_budget_usd is None:
                 stored_usd = self._redis.get(self._monthly_budget_usd_key)
                 monthly_budget_usd = (
-                    float(stored_usd) if stored_usd is not None else None
+                    self._parse_float_value(stored_usd, "monthly_budget_usd")
+                    if stored_usd is not None
+                    else None
                 )
             if monthly_budget_tokens is None:
                 stored_tokens = self._redis.get(self._monthly_budget_tokens_key)
                 monthly_budget_tokens = (
-                    int(float(stored_tokens)) if stored_tokens is not None else None
+                    self._parse_int_value(stored_tokens, "monthly_budget_tokens")
+                    if stored_tokens is not None
+                    else None
                 )
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
@@ -104,6 +115,10 @@ class UsageMeter:
 
     def track(self, estimated_cost: float) -> Callable:
         """Decorator that checks budget before calling the wrapped function."""
+        estimated_cost = self._validate_estimated_cost(
+            estimated_cost,
+            "estimated_cost",
+        )
 
         def decorator(func: Callable) -> Callable:
             @wraps(func)
@@ -148,8 +163,10 @@ class UsageMeter:
 
     def can_spend(self, estimated_cost_usd: float) -> bool:
         """Check if the agent can afford the estimated cost without exceeding budget."""
-        if estimated_cost_usd < 0:
-            raise ValueError("estimated_cost_usd cannot be negative.")
+        estimated_cost_usd = self._validate_estimated_cost(
+            estimated_cost_usd,
+            "estimated_cost_usd",
+        )
 
         self._maybe_auto_reset()
         usage = self.get_usage()
@@ -175,12 +192,14 @@ class UsageMeter:
         tokens_used: int = 0,
     ) -> None:
         """Record actual usage after an LLM call."""
-        if input_tokens < 0 or output_tokens < 0 or tokens_used < 0:
-            raise ValueError("Token counts cannot be negative.")
+        input_tokens = self._validate_token_count(input_tokens)
+        output_tokens = self._validate_token_count(output_tokens)
+        tokens_used = self._validate_token_count(tokens_used)
 
         if tokens_used > 0 and input_tokens == 0 and output_tokens == 0:
-            # Backward-compatible path when caller only has total tokens.
-            input_tokens = tokens_used
+            # Total-only usage cannot be split accurately; use output pricing
+            # as the conservative default for split-priced models.
+            output_tokens = tokens_used
 
         total_tokens = tokens_used or (input_tokens + output_tokens)
         call_cost = calculate_cost(
@@ -214,8 +233,10 @@ class UsageMeter:
             )
 
         try:
-            self._redis.incrbyfloat(self._usd_spent_key, call_cost)
-            self._redis.incrby(self._tokens_spent_key, total_tokens)
+            pipe = self._redis.pipeline(transaction=True)
+            pipe.incrbyfloat(self._usd_spent_key, call_cost)
+            pipe.incrby(self._tokens_spent_key, total_tokens)
+            pipe.execute()
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
 
@@ -270,7 +291,7 @@ class UsageMeter:
                 self._redis.set(self._last_reset_key, time.time())
                 return
 
-            if should_reset(float(raw)):
+            if should_reset(self._parse_float_value(raw, "last_reset")):
                 perform_reset(self.agent_id, self._redis)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
@@ -280,14 +301,20 @@ class UsageMeter:
             raw = self._redis.get(key)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
-        return float(raw) if raw is not None else 0.0
+        if raw is None:
+            return 0.0
+        field_name = key.rsplit(":", maxsplit=1)[-1]
+        return self._parse_float_value(raw, field_name)
 
     def _read_int(self, key: str) -> int:
         try:
             raw = self._redis.get(key)
         except RedisError as exc:
             raise RedisConnectionError(str(exc)) from exc
-        return int(float(raw)) if raw is not None else 0
+        if raw is None:
+            return 0
+        field_name = key.rsplit(":", maxsplit=1)[-1]
+        return self._parse_int_value(raw, field_name)
 
     def _instrument_create(
         self,
@@ -389,6 +416,88 @@ class UsageMeter:
         return node
 
     @staticmethod
+    def _coerce_finite_float(raw_value: object) -> float:
+        value = float(raw_value)
+        if not isfinite(value):
+            raise ValueError
+        return value
+
+    @staticmethod
+    def _coerce_integral_decimal(raw_value: object) -> Decimal:
+        value = Decimal(str(raw_value))
+        if not value.is_finite() or value != value.to_integral_value():
+            raise ValueError
+        return value
+
+    @staticmethod
+    def _validate_monthly_budget_usd(raw_value: object | None) -> float | None:
+        if raw_value is None:
+            return None
+        try:
+            value = UsageMeter._coerce_finite_float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise InvalidBudgetError(
+                "monthly_budget_usd must be a finite number."
+            ) from exc
+        if value <= 0:
+            raise InvalidBudgetError("monthly_budget_usd must be greater than zero.")
+        return value
+
+    @staticmethod
+    def _validate_monthly_budget_tokens(raw_value: object | None) -> int | None:
+        if raw_value is None:
+            return None
+        try:
+            value = UsageMeter._coerce_integral_decimal(raw_value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+            raise InvalidBudgetError(
+                "monthly_budget_tokens must be a finite integer."
+            ) from exc
+        if value <= 0:
+            raise InvalidBudgetError("monthly_budget_tokens must be greater than zero.")
+        return int(value)
+
+    @staticmethod
+    def _validate_estimated_cost(raw_value: object, field_name: str) -> float:
+        try:
+            value = UsageMeter._coerce_finite_float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError(f"{field_name} must be finite.") from exc
+        if value < 0:
+            raise ValueError(f"{field_name} cannot be negative.")
+        return value
+
+    @staticmethod
+    def _validate_token_count(raw_value: object) -> int:
+        try:
+            value = UsageMeter._coerce_integral_decimal(raw_value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+            raise ValueError("Token counts must be finite integers.") from exc
+        if value < 0:
+            raise ValueError("Token counts cannot be negative.")
+        return int(value)
+
+    @staticmethod
+    def _parse_float_value(raw_value: object, field_name: str) -> float:
+        try:
+            value = UsageMeter._coerce_finite_float(raw_value)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise RedisDataError(
+                f"Invalid numeric value for {field_name}: {raw_value}"
+            ) from exc
+        return value
+
+    @staticmethod
+    def _parse_int_value(raw_value: object, field_name: str) -> int:
+        try:
+            value = UsageMeter._coerce_integral_decimal(raw_value)
+            return int(value)
+        except (TypeError, ValueError, ArithmeticError, InvalidOperation) as exc:
+            raise RedisDataError(
+                f"Invalid integer value for {field_name}: {raw_value}"
+            ) from exc
+
+    @staticmethod
     def _read_attr(source: object | None, field: str) -> object | None:
         if source is None:
             return None
@@ -401,9 +510,6 @@ class UsageMeter:
         if raw_value is None:
             return 0
         try:
-            value = int(raw_value)
-        except (TypeError, ValueError) as exc:
+            return UsageMeter._validate_token_count(raw_value)
+        except ValueError as exc:
             raise ValueError(f"Invalid token count: {raw_value}") from exc
-        if value < 0:
-            raise ValueError("Token counts cannot be negative.")
-        return value

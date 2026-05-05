@@ -13,6 +13,10 @@ class RedisConnectionError(AgentLimitError):
     """Raised when Redis is unreachable."""
 
 
+class RedisDataError(AgentLimitError):
+    """Raised when stored Redis data cannot be parsed."""
+
+
 class UnknownModelError(AgentLimitError):
     """Raised when a model is not in the pricing table."""
 

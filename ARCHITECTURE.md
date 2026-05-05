@@ -69,7 +69,14 @@ class UsageMeter:
     ): ...
 
     def can_spend(self, estimated_cost_usd: float) -> bool: ...
-    def record(self, provider: str, model: str, tokens_used: int) -> None: ...
+    def record(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        tokens_used: int = 0,
+    ) -> None: ...
     def get_usage(self) -> UsageStats: ...
     def reset(self) -> None: ...
 ```
@@ -87,16 +94,25 @@ PRICING = {
         "gpt-4o-mini":   {"input": 0.00000015, "output": 0.0000006},
     },
     "anthropic": {
-        "claude-sonnet-4": {"input": 0.000003, "output": 0.000015},
-        "claude-haiku-4":  {"input": 0.00000025, "output": 0.00000125},
+        "claude-sonnet-4-6":         {"input": 0.000003, "output": 0.000015},
+        "claude-haiku-4-5-20251001": {"input": 0.000001, "output": 0.000005},
+        "claude-haiku-4-5":          {"input": 0.000001, "output": 0.000005},
     }
 }
 
-def calculate_cost(provider: str, model: str, tokens: int) -> float: ...
+def calculate_cost(
+    provider: str,
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> float: ...
 def get_supported_models() -> dict: ...
 ```
 
 Developers can pass `custom_pricing` dict to override or extend.
+For exact split-priced USD accounting, callers pass input and output token
+counts. Total-only `tokens_used` is retained for token budgets and is priced
+conservatively as output tokens when no split counts are available.
 
 ---
 
@@ -196,10 +212,10 @@ Developer calls can_spend(estimated_cost=0.05)
 Developer calls LLM API
     → gets response with token usage
 
-Developer calls record(provider, model, tokens_used)
+Developer calls record(provider, model, input_tokens, output_tokens, tokens_used)
     → meter calculates actual cost via providers.py
-    → meter increments usd_spent and tokens_spent in Redis (INCRBYFLOAT / INCRBY)
     → meter checks last_reset → no reset needed
+    → meter increments usd_spent and tokens_spent in one Redis transaction
     → meter calls alert_manager.check_and_fire()
     → no threshold crossed → no alert
 ```
@@ -236,9 +252,10 @@ Developer calls record(...)
 In-memory state is lost on process restart. Agents often run across multiple
 processes or restarts. Redis gives persistent, atomic counters that survive restarts.
 
-### Why INCRBYFLOAT for USD tracking?
-Atomic increment without race conditions. Safe for concurrent agent instances
-hitting the same agent_id.
+### Why a Redis transaction for usage counters?
+`record(...)` updates USD and token counters together in one Redis transaction,
+so a connection failure during execution does not leave a partially recorded
+call. The budget check remains separate from the post-call record step.
 
 ### Why fail loudly on Redis connection error?
 Silent failure would mean metering is skipped without the developer knowing.

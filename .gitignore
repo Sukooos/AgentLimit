@@ -8,6 +8,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+.worktrees/
 build/
 develop-eggs/
 dist/
@@ -49,6 +50,7 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+pytest-cache-files-*/
 cover/
 
 # Translations
